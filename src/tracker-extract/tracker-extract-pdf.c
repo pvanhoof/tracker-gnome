@@ -253,7 +253,6 @@ extract_content_with_ocr(gint page, gint n_pages,
 static void
 extract_content_with_ocr_dispose_temp(const gchar *tmp_path)
 {
-g_print("Dipose: %s", tmp_path);
 	GDir *dir = g_dir_open (tmp_path, 0, NULL);
 	if (dir) {
 		const gchar *name = g_dir_read_name(dir);
