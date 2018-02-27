@@ -49,7 +49,12 @@
 #include "tracker-main.h"
 
 /* Time in seconds before we stop processing content */
+#ifdef HAVE_CAN_OCR
+#define EXTRACTION_PROCESS_TIMEOUT 60
+static void extract_content_with_ocr_dispose_temp(const gchar *tmp_path);
+#else
 #define EXTRACTION_PROCESS_TIMEOUT 10
+#endif
 
 typedef struct {
 	gchar *title;
@@ -192,9 +197,85 @@ read_outline (PopplerDocument *document,
 	}
 }
 
+#ifdef HAVE_CAN_OCR
+static gchar*
+extract_content_with_ocr_prepare(const gchar *filename, gint n_pages)
+{
+	gchar *tmp_path = g_dir_make_tmp("tracker-extract-PDF-XXXXXX", NULL);
+	gchar *base_name = g_path_get_basename(filename);
+	const gchar *pdftoppm_argv[] = { PDFTOPPM_BIN, filename, base_name, NULL };
+
+	if (g_spawn_sync (tmp_path, (gchar**) pdftoppm_argv, NULL,
+	                  G_SPAWN_STDERR_TO_DEV_NULL | G_SPAWN_STDOUT_TO_DEV_NULL,
+	                  NULL, NULL, NULL, NULL, NULL, NULL))
+	{
+		g_free (base_name);
+		return tmp_path;
+	}
+
+	g_free (base_name);
+	g_free (tmp_path);
+	return NULL;
+}
+
+static gchar*
+extract_content_with_ocr(gint page, gint n_pages,
+                         PopplerRectangle rect,
+                         const gchar *tmp_path,
+                         const gchar *filename)
+{
+	gchar *standard_output = NULL;
+	gchar *base_name = g_path_get_basename(filename);
+	gchar *page_ppm = g_strdup_printf("%s-%d.ppm", base_name, page+1);
+	gchar *page_unpaper_ppm = g_strdup_printf("%s-%d-unpaper.ppm", base_name, page+1);
+	const gchar *unpaper_argv[] = { UNPAPER_BIN, page_ppm, page_unpaper_ppm,
+	                               NULL };
+
+	if (g_spawn_sync (tmp_path, (gchar**) unpaper_argv, NULL,
+	                  G_SPAWN_STDERR_TO_DEV_NULL | G_SPAWN_STDOUT_TO_DEV_NULL,
+	                  NULL, NULL, NULL, NULL, NULL, NULL))
+	{
+		const gchar *tesseract_argv[] = { TESSERACT_BIN, "-l", "eng",
+		                                 page_unpaper_ppm, "stdout", NULL };
+		g_spawn_sync (tmp_path, (gchar**) tesseract_argv, NULL,
+		              G_SPAWN_STDERR_TO_DEV_NULL,
+		              NULL, NULL, &standard_output, NULL, NULL, NULL);
+		g_remove (page_unpaper_ppm);
+	}
+
+	g_free (base_name);
+	g_free (page_ppm);
+	g_free (page_unpaper_ppm);
+
+	return standard_output;
+}
+
+static void
+extract_content_with_ocr_dispose_temp(const gchar *tmp_path)
+{
+g_print("Dipose: %s", tmp_path);
+	GDir *dir = g_dir_open (tmp_path, 0, NULL);
+	if (dir) {
+		const gchar *name = g_dir_read_name(dir);
+		while (name != NULL) {
+			gchar *full_path = g_build_filename(tmp_path, name, NULL);
+			if (g_file_test(full_path, G_FILE_TEST_IS_DIR)) {
+				extract_content_with_ocr_dispose_temp(full_path);
+			}
+			g_remove(full_path);
+			g_free (full_path);
+			name = g_dir_read_name(dir);
+		}
+		g_dir_close(dir);
+		g_remove(tmp_path);
+	}
+}
+#endif
+
 static gchar *
 extract_content_text (PopplerDocument *document,
-                      gsize            n_bytes)
+                      gsize            n_bytes,
+                      const gchar     *filename)
 {
 	GString *string;
 	GTimer *timer;
@@ -206,6 +287,8 @@ extract_content_text (PopplerDocument *document,
 	string = g_string_new ("");
 	timer = g_timer_new ();
 
+	gchar *ocr_tmp = NULL;
+
 	for (i = 0, remaining_bytes = n_bytes, elapsed = g_timer_elapsed (timer, NULL);
 	     i < n_pages && remaining_bytes > 0 && elapsed < EXTRACTION_PROCESS_TIMEOUT;
 	     i++, elapsed = g_timer_elapsed (timer, NULL)) {
@@ -216,9 +299,22 @@ extract_content_text (PopplerDocument *document,
 		page = poppler_document_get_page (document, i);
 		text = poppler_page_get_text (page);
 
-		if (!text) {
-			g_object_unref (page);
-			continue;
+		if (!text || text[0] == '\0') {
+#ifdef HAVE_CAN_OCR
+			if (!ocr_tmp) {
+				ocr_tmp = extract_content_with_ocr_prepare(filename, n_pages);
+			}
+
+			if (ocr_tmp) {
+				PopplerRectangle rect;
+				poppler_page_get_crop_box (page, &rect);
+				text = extract_content_with_ocr(i, n_pages, rect, ocr_tmp, filename);
+			}
+#endif
+			if (!text) {
+				g_object_unref (page);
+				continue;
+			}
 		}
 
 		if (tracker_text_validate_utf8 (text,
@@ -237,6 +333,13 @@ extract_content_text (PopplerDocument *document,
 		g_free (text);
 		g_object_unref (page);
 	}
+
+#ifdef HAVE_CAN_OCR
+	if (ocr_tmp) {
+		extract_content_with_ocr_dispose_temp(ocr_tmp);
+		g_free (ocr_tmp);
+	}
+#endif
 
 	if (elapsed >= EXTRACTION_PROCESS_TIMEOUT) {
 		g_debug ("Extraction timed out, %d seconds reached", EXTRACTION_PROCESS_TIMEOUT);
@@ -343,7 +446,6 @@ tracker_extract_get_metadata (TrackerExtractInfo *info)
 		len = st.st_size;
 	}
 
-	g_free (filename);
 	uri = g_file_get_uri (file);
 
 	document = poppler_document_new_from_data (contents, len, NULL, &error);
@@ -361,6 +463,7 @@ tracker_extract_get_metadata (TrackerExtractInfo *info)
 			g_error_free (error);
 			g_free (uri);
 			close (fd);
+			g_free (filename);
 
 			return TRUE;
 		} else {
@@ -371,6 +474,7 @@ tracker_extract_get_metadata (TrackerExtractInfo *info)
 			g_error_free (error);
 			g_free (uri);
 			close (fd);
+			g_free (filename);
 
 			return FALSE;
 		}
@@ -382,6 +486,8 @@ tracker_extract_get_metadata (TrackerExtractInfo *info)
 		           uri);
 		g_free (uri);
 		close (fd);
+		g_free (filename);
+
 		return FALSE;
 	}
 
@@ -589,7 +695,8 @@ tracker_extract_get_metadata (TrackerExtractInfo *info)
 
 	config = tracker_main_get_config ();
 	n_bytes = tracker_config_get_max_bytes (config);
-	content = extract_content_text (document, n_bytes);
+	content = extract_content_text (document, n_bytes, filename);
+	g_free (filename);
 
 	if (content) {
 		tracker_resource_set_string (metadata, "nie:plainTextContent", content);

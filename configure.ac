@@ -1188,6 +1188,28 @@ fi
 
 AM_CONDITIONAL(HAVE_POPPLER, test "x$have_poppler" = "xyes")
 
+
+
+##################################################################
+# Check for tracker-extract: tesseract, unpaper, pdftoppm for OCR
+##################################################################
+
+have_ocr=no
+AC_PATH_PROG([TESSERACT], [tesseract])
+if test ! -z $TESSERACT; then
+    AC_PATH_PROG([UNPAPER], [unpaper])
+    if test ! -z $UNPAPER; then
+        AC_PATH_PROG([PDFTOPPM], [pdftoppm])
+        if test ! -z $PDFTOPPM; then
+            AC_DEFINE(HAVE_CAN_OCR, 1, [We can do OCR on PDF files])
+            AC_DEFINE_UNQUOTED(TESSERACT_BIN, ["$TESSERACT"], [Tesseract binary])
+            AC_DEFINE_UNQUOTED(UNPAPER_BIN, ["$UNPAPER"], [Unpaper binary])
+            AC_DEFINE_UNQUOTED(PDFTOPPM_BIN, ["$PDFTOPPM"], [PDFtoPPM binary])
+            have_ocr=yes
+        fi
+    fi
+fi
+
 ##################################################################
 # Check for tracker-extract: libgxps for XPS
 ##################################################################
@@ -1889,7 +1911,7 @@ echo "
 Metadata Extractors:
 
 	Support PNG:                            $have_libpng
-	Support PDF:                            $have_poppler
+	Support PDF:                            $have_poppler (ocr: $have_ocr)
 	Support XPS:                            $have_libgxps
 	Support GIF:                            $have_libgif (xmp: $have_exempi)
 	Support JPEG:                           $have_libjpeg (xmp: $have_exempi, exif: $have_libexif, iptc: $have_libiptcdata)
